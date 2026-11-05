@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>ESP32 导航推送</title>
+<script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:#0e1116;color:#e8eaed;font-family:-apple-system,"PingFang SC",sans-serif;padding:16px;max-width:520px;margin:0 auto}
+  h1{font-size:17px;font-weight:600;margin:10px 0}
+  .card{background:#171b22;border:1px solid #262b35;border-radius:14px;padding:14px;margin-bottom:12px}
+  .row{display:flex;gap:8px;align-items:center;margin:8px 0;flex-wrap:wrap}
+  input,select{background:#12161c;border:1px solid #2a3140;color:#e8eaed;border-radius:8px;padding:8px;font-size:14px}
+  input{flex:1;min-width:0}
+  button{background:#185fa5;color:#fff;border:0;border-radius:8px;padding:10px 16px;font-size:14px;font-weight:500}
+  button.ghost{background:#262b35}
+  button.danger{background:#a32d2d}
+  .stat{font-size:12px;color:#9aa4b2;line-height:1.8}
+  .stat b{color:#2ecc71}
+  .stat b.off{color:#e74c3c}
+  .wpt{display:flex;gap:6px;align-items:center;font-size:12px;color:#9aa4b2;padding:6px 0;border-top:1px solid #232830}
+  .wpt b{color:#e8eaed}
+  .big{font-size:34px;font-weight:600;text-align:center;padding:10px 0;font-variant-numeric:tabular-nums}
+  .hint{font-size:11px;color:#5d6675;line-height:1.6;margin-top:6px}
+</style>
+</head>
+<body>
+
+<h1>ESP32 导航推送端</h1>
+
+<div class="card">
+  <div class="stat">
+    MQTT：<b id="mqttStat" class="off">未连接</b> ·
+    定位：<b id="gpsStat" class="off">未开启</b> ·
+    精度 <span id="acc">-</span>m
+  </div>
+  <div class="big" id="pos">--.----, --.----</div>
+  <div class="row">
+    <button id="btnStart">开始导航</button>
+    <button id="btnStop" class="danger">停止</button>
+    <button id="btnTest" class="ghost">模拟一条（测试板子）</button>
+  </div>
+  <div class="hint">「开始导航」会请求定位权限并保持屏幕常亮。锁屏后 iOS 会暂停网页，导航时请保持亮屏（或用充电支架）。</div>
+</div>
+
+<div class="card">
+  <h1 style="font-size:14px">转弯点列表（按顺序经过）</h1>
+  <div class="row">
+    <input id="lat" placeholder="纬度 30.2741" inputmode="decimal">
+    <input id="lng" placeholder="经度 120.1551" inputmode="decimal">
+  </div>
+  <div class="row">
+    <select id="dir">
+      <option value="0">直行</option><option value="1">左转</option>
+      <option value="2">右转</option><option value="3">掉头</option>
+      <option value="4">到达</option>
+    </select>
+    <input id="road" placeholder="路名（如 文一西路）">
+    <button id="btnAdd">添加</button>
+  </div>
+  <div id="list"></div>
+  <div class="row"><button id="btnClear" class="ghost">清空全部</button>
+  <button id="btnHere" class="ghost">把当前位置填入上面</button></div>
+  <div class="hint">取坐标：在高德地图网页版（lbs.amap.com/tools/picker）点选位置复制经纬度，注意顺序是「经度,纬度」，填的时候反过来。距离转弯点 &lt;40 米视为已通过，自动切到下一个。</div>
+</div>
+
+<div class="card">
+  <div class="big" id="next">--</div>
+  <div class="stat" style="text-align:center" id="nextInfo">等待定位…</div>
+</div>
+
+<script>
+// ========= 配置：与固件里 NAV_TOPIC 保持一致 =========
+const TOPIC = 'wbx/nav/demo';
+const MQTT_URL = 'wss://broker.emqx.io:8084/mqtt';
+const PASS_RADIUS = 40;   // 距离转弯点小于该米数视为已通过
+// ====================================================
+
+let client = null, watchId = null, wakeLock = null;
+let cur = null;                       // {lat,lng,acc}
+let waypoints = JSON.parse(localStorage.getItem('wps') || '[]');
+let nextIdx = 0;
+
+const $ = id => document.getElementById(id);
+
+// ---------- MQTT ----------
+function mqttConnect() {
+  client = mqtt.connect(MQTT_URL, {clientId: 'wbx-iphone-' + Math.random().toString(16).slice(2, 8)});
+  client.on('connect', () => { $('mqttStat').textContent = '已连接'; $('mqttStat').className = 'b'; });
+  client.on('close', () => { $('mqttStat').textContent = '断开'; $('mqttStat').className = 'b off'; });
+  client.on('error', e => console.error(e));
+}
+function publish(obj) {
+  if (client && client.connected) client.publish(TOPIC, JSON.stringify(obj));
+}
+
+// ---------- 定位 ----------
+function startNav() {
+  mqttConnect();
+  navigator.wakeLock && navigator.wakeLock.request('screen').then(w => wakeLock = w).catch(()=>{});
+  watchId = navigator.geolocation.watchPosition(p => {
+    cur = {lat: p.coords.latitude, lng: p.coords.longitude, acc: Math.round(p.coords.accuracy)};
+    $('gpsStat').textContent = '工作中'; $('gpsStat').className = 'b';
+    $('acc').textContent = cur.acc;
+    $('pos').textContent = cur.lat.toFixed(5) + ', ' + cur.lng.toFixed(5);
+    tick();
+  }, e => {
+    $('gpsStat').textContent = '定位失败: ' + e.message; $('gpsStat').className = 'b off';
+  }, {enableHighAccuracy: true, maximumAge: 1000, timeout: 8000});
+}
+function stopNav() {
+  if (watchId) navigator.geolocation.clearWatch(watchId);
+  watchId = null; wakeLock && wakeLock.release();
+  $('gpsStat').textContent = '未开启'; $('gpsStat').className = 'b off';
+}
+
+// ---------- 转弯点 ----------
+function distM(a, b) {
+  const R = 6371000, rad = d => d * Math.PI / 180;
+  const dLat = rad(b.lat - a.lat), dLng = rad(b.lng - a.lng);
+  const s = Math.sin(dLat/2)**2 + Math.cos(rad(a.lat))*Math.cos(rad(b.lat))*Math.sin(dLng/2)**2;
+  return 2 * R * Math.asin(Math.sqrt(s));
+}
+function tick() {
+  if (!cur || nextIdx >= waypoints.length) {
+    if (cur && waypoints.length && nextIdx >= waypoints.length) {
+      $('next').textContent = '🏁'; $('nextInfo').textContent = '全部转弯点已通过';
+      publish({dist: 0, dir: 4, road: '到达'});
+      nextIdx = waypoints.length + 1;   // 只发一次到达
+    }
+    return;
+  }
+  const w = waypoints[nextIdx];
+  const d = Math.round(distM(cur, w));
+  $('next').textContent = d + ' m';
+  $('nextInfo').textContent = (w.dir == 1 ? '左转 ' : w.dir == 2 ? '右转 ' : w.dir == 3 ? '掉头 ' : '直行 ') + (w.road || '');
+  publish({dist: d, dir: w.dir, road: w.road || ''});
+  if (d < PASS_RADIUS) nextIdx++;
+}
+setInterval(() => { if (watchId) tick(); }, 2000);   // 2 秒推一次
+
+// ---------- UI ----------
+function render() {
+  $('list').innerHTML = waypoints.map((w, i) =>
+    `<div class="wpt">${i+1}. <b>${['直行','左转','右转','掉头','到达'][w.dir]}</b> ${w.road||''} <span>${w.lat.toFixed(5)},${w.lng.toFixed(5)}</span></div>`).join('')
+    || '<div class="wpt">还没有转弯点</div>';
+  localStorage.setItem('wps', JSON.stringify(waypoints));
+}
+$('btnAdd').onclick = () => {
+  const lat = parseFloat($('lat').value), lng = parseFloat($('lng').value);
+  if (isNaN(lat) || isNaN(lng)) return alert('坐标没填对');
+  waypoints.push({lat, lng, dir: +$('dir').value, road: $('road').value});
+  nextIdx = 0; render();
+};
+$('btnClear').onclick = () => { waypoints = []; nextIdx = 0; render(); };
+$('btnHere').onclick = () => { if (cur) { $('lat').value = cur.lat.toFixed(6); $('lng').value = cur.lng.toFixed(6); } else alert('先点「开始导航」拿到定位'); };
+$('btnStart').onclick = startNav;
+$('btnStop').onclick = stopNav;
+$('btnTest').onclick = () => {   // 桌面测试：直接给板子发一条
+  mqttConnect();
+  setTimeout(() => publish({dist: 300, dir: 2, road: '文一西路'}), 800);
+};
+render();
+</script>
+</body>
+</html>
