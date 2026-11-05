@@ -124,7 +124,8 @@ mqttConnect();
 // ========= 页面打开就挂着定位（只显示状态，不参与导航）=========
 navigator.geolocation.watchPosition(p=>{
   const g=wgs2gcj(p.coords.latitude,p.coords.longitude);
-  if(!watchId) pos={lat:g[0],lng:g[1]};   // 未开始导航时缓存位置，规划路线可用
+  // 只在"既没开真实导航、也没在模拟"时才把 GPS 写进 pos，避免覆盖模拟位置
+  if(!watchId && !simTimer) pos={lat:g[0],lng:g[1]};
   if($('gpsStat').textContent==='未开启'||$('gpsStat').textContent.startsWith('定位失败')){
     $('gpsStat').textContent='信号正常'; $('gpsStat').className='b';
     $('acc').textContent=Math.round(p.coords.accuracy);
