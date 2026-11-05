@@ -34,7 +34,7 @@ details summary{cursor:pointer;color:var(--dim);font-size:13px;padding:4px 0}
 </style>
 </head>
 <body>
-<h1>ESP32 导航推送端</h1>
+<h1>ESP32 导航推送端 <span style="font-size:12px;color:#8b949e;font-weight:400">v3 · 2026-11-05</span></h1>
 
 <div class="card">
   <div class="stat">MQTT：<b id="mqttStat" class="off">连接中</b> · 频道 <span id="topicShow"></span></div>
@@ -71,6 +71,7 @@ details summary{cursor:pointer;color:var(--dim);font-size:13px;padding:4px 0}
     <button id="btnSim" class="ghost">室内模拟行走</button>
   </div>
   <div class="row"><button id="btnStop" class="red">停止</button></div>
+  <div class="row"><button id="btnSkip" class="ghost">⏩ 跳到下个转弯（测蜂鸣）</button></div>
   <div class="hint">室内模拟 = 沿规划好的路线虚拟前进，不出门就能完整测试板子的屏幕和蜂鸣。真实导航请用上面的按钮（保持屏幕常亮，锁屏会暂停）。</div>
 </div>
 
@@ -81,6 +82,7 @@ details summary{cursor:pointer;color:var(--dim);font-size:13px;padding:4px 0}
   <div class="sub" id="nextRoad">等待路线…</div>
   <div class="prog"><div id="prog"></div></div>
   <div class="hint" style="text-align:center;margin-top:6px">总程 <span id="totalLen">-</span> · 已走 <span id="doneLen">-</span></div>
+  <div class="hint" id="dbg" style="font-family:monospace;font-size:11px;color:#5d6675;margin-top:8px;word-break:break-all">调试：等待路线</div>
 </div>
 
 <div class="card">
@@ -97,7 +99,7 @@ const $ = id => document.getElementById(id);
 let client=null, watchId=null, wakeLock=null;
 let route=null;          // {pts:[{lat,lng}], cum:[米], turns:[{at,dir,road}], total}
 let pos=null;            // 当前位置 {lat,lng}
-let simTimer=null, lastPub=0, lastPubAt=0;
+let simTimer=null, lastPub=0, lastPubAt=0, simMeters=0;
 
 $('topicShow').textContent = TOPIC;
 $('amapKey').value = localStorage.getItem('wbx_key') || '';
@@ -239,17 +241,20 @@ function nextTurnFor(cum){
 function tick(){
   if(!route||!pos) return;
   const {cum,offRoute}=locateOnRoute(pos);
-  const t=nextTurnFor(cum);
-  const remain=Math.max(0,Math.round(t.at-cum));
+  // 模拟模式下直接用累计里程，不依赖路径匹配，双保险
+  const effCum = simTimer ? Math.min(simMeters, route.total) : cum;
+  const t=nextTurnFor(effCum);
+  const remain=Math.max(0,Math.round(t.at-effCum));
   // 界面
   $('nextTurn').textContent={0:'⬆ 直行',1:'⬅ 左转',2:'➡ 右转',3:'↩ 掉头',4:'🏁 到达'}[t.dir];
   $('dist').textContent=remain>=1000?(remain/1000).toFixed(1):remain;
   $('unit').textContent=remain>=1000?'km':'m';
   $('nextRoad').textContent=t.road+(offRoute>60?'（偏离路线 '+Math.round(offRoute)+'m）':'');
-  $('doneLen').textContent=fmt(Math.min(cum,route.total));
-  $('prog').style.width=(cum/route.total*100).toFixed(1)+'%';
+  $('doneLen').textContent=fmt(effCum);
+  $('prog').style.width=(effCum/route.total*100).toFixed(1)+'%';
   $('navState').textContent = simTimer?'模拟中':(watchId?'导航中':'待机');
   $('navState').className='b';
+  $('dbg').textContent = `pts=${route.pts.length} timer=${simTimer?'ON':'off'} sim=${Math.round(simMeters)}m cum=${Math.round(cum)}m pos=${pos.lat.toFixed(5)},${pos.lng.toFixed(5)}`;
   // 推送（每 2 秒）
   const now=Date.now();
   if(now-lastPub>=2000){ lastPub=now; publish({dist:remain,dir:t.dir,road:t.road||''}); }
@@ -274,30 +279,44 @@ function startGPS(){
 }
 
 // ========= 模式二：室内模拟 =========
+let simIdx = 0;
+function simAdvance(step){
+  let remain = step;
+  while(remain>0 && simIdx<route.pts.length-1){
+    const a=route.pts[simIdx], b=route.pts[simIdx+1];
+    const seg=distM(a,b);
+    if(seg<=remain||seg===0){remain-=seg;simIdx++;pos={...b};}
+    else{const r=remain/seg;pos={lat:a.lat+(b.lat-a.lat)*r,lng:a.lng+(b.lng-a.lng)*r};remain=0;}
+  }
+}
 function startSim(){
   if(!route){alert('先规划路线');return;}
   stopAll();
   mqttConnect();
-  lastIdx = 0;
-  pos={...route.pts[0]};
-  const speed=+$('simSpeed').value;
-  const interval=400, step=speed*interval/1000;
-  let i=0;
+  lastIdx=0; simIdx=0; simMeters=0; pos={...route.pts[0]};
+  const step = +$('simSpeed').value * 0.4;   // 每 400ms 前进的米数
   simTimer=setInterval(()=>{
-    let remain=step;
-    while(remain>0&&i<route.pts.length-1){
-      const a=route.pts[i],b=route.pts[i+1];
-      const seg=distM(a,b);
-      if(seg<=remain||seg===0){remain-=seg;i++;pos={...b};}   // 跳点时同步更新 pos，防冻结
-      else{
-        const r=remain/seg;
-        pos={lat:a.lat+(b.lat-a.lat)*r,lng:a.lng+(b.lng-a.lng)*r};
-        remain=0;
-      }
+    if(simMeters >= route.total-0.5){
+      clearInterval(simTimer); simTimer=null;
+      $('navState').textContent='🏁 模拟到达'; $('navState').className='b';
+      publish({dist:0,dir:4,road:''});
+      return;
     }
+    simMeters = Math.min(simMeters + step, route.total);
+    simAdvance(step);
     tick();
-    if(i>=route.pts.length-1){ clearInterval(simTimer); simTimer=null; $('navState').textContent='🏁 模拟到达'; }
-  },interval);
+  },400);
+  tick();
+}
+function jumpNextTurn(){
+  if(!route){alert('先规划路线');return;}
+  if(!simTimer) startSim();
+  const t = nextTurnFor(simMeters);
+  simMeters = Math.min(Math.max(simMeters, t.at - 5), route.total);
+  simIdx = 0;
+  while(simIdx < route.cum.length-1 && route.cum[simIdx] < simMeters) simIdx++;
+  pos = {...route.pts[simIdx]};
+  tick();
 }
 
 // ========= 停止 / 测试 =========
@@ -312,6 +331,7 @@ $('btnRoute').onclick=planRoute;
 $('btnGo').onclick=startGPS;
 $('btnSim').onclick=startSim;
 $('btnStop').onclick=stopAll;
+$('btnSkip').onclick=jumpNextTurn;
 $('btnTest').onclick=()=>{
   mqttConnect();
   lastSent=null;
