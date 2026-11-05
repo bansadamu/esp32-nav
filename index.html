@@ -1,168 +1,312 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
-<meta name="apple-mobile-web-app-capable" content="yes">
-<title>ESP32 导航推送</title>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>ESP32 导航推送端</title>
 <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
 <style>
-  *{box-sizing:border-box;margin:0;padding:0}
-  body{background:#0e1116;color:#e8eaed;font-family:-apple-system,"PingFang SC",sans-serif;padding:16px;max-width:520px;margin:0 auto}
-  h1{font-size:17px;font-weight:600;margin:10px 0}
-  .card{background:#171b22;border:1px solid #262b35;border-radius:14px;padding:14px;margin-bottom:12px}
-  .row{display:flex;gap:8px;align-items:center;margin:8px 0;flex-wrap:wrap}
-  input,select{background:#12161c;border:1px solid #2a3140;color:#e8eaed;border-radius:8px;padding:8px;font-size:14px}
-  input{flex:1;min-width:0}
-  button{background:#185fa5;color:#fff;border:0;border-radius:8px;padding:10px 16px;font-size:14px;font-weight:500}
-  button.ghost{background:#262b35}
-  button.danger{background:#a32d2d}
-  .stat{font-size:12px;color:#9aa4b2;line-height:1.8}
-  .stat b{color:#2ecc71}
-  .stat b.off{color:#e74c3c}
-  .wpt{display:flex;gap:6px;align-items:center;font-size:12px;color:#9aa4b2;padding:6px 0;border-top:1px solid #232830}
-  .wpt b{color:#e8eaed}
-  .big{font-size:34px;font-weight:600;text-align:center;padding:10px 0;font-variant-numeric:tabular-nums}
-  .hint{font-size:11px;color:#5d6675;line-height:1.6;margin-top:6px}
+:root{--bg:#0d1117;--card:#161b22;--line:#2a3139;--txt:#e6edf3;--dim:#8b949e;--acc:#4f8cff;--ok:#3fb950;--bad:#f85149}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--txt);font-family:-apple-system,sans-serif;padding:14px;max-width:520px;margin:0 auto;font-size:15px}
+h1{font-size:17px;margin:6px 0 12px}
+h2{font-size:13px;color:var(--dim);margin:18px 0 8px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;margin-bottom:12px}
+.row{display:flex;gap:8px;margin-bottom:8px}
+.row>*{flex:1}
+input,select{background:#0d1117;border:1px solid var(--line);border-radius:8px;color:var(--txt);padding:10px;font-size:15px;width:100%}
+button{border:0;border-radius:8px;padding:11px 14px;font-size:15px;font-weight:600;background:var(--acc);color:#fff;width:100%}
+button.ghost{background:transparent;border:1px solid var(--line);color:var(--txt)}
+button.red{background:var(--bad)}
+button:disabled{opacity:.4}
+.b{color:var(--ok);font-weight:600}.b.off{color:var(--bad)}
+.stat{font-size:13px;color:var(--dim);margin-bottom:6px}
+.big{font-size:44px;font-weight:800;text-align:center;margin:10px 0 2px;font-variant-numeric:tabular-nums}
+.sub{text-align:center;color:var(--dim);font-size:14px;min-height:20px}
+.next{text-align:center;font-size:22px;font-weight:700;margin:6px 0}
+.hint{font-size:12px;color:var(--dim);line-height:1.6;margin-top:8px}
+.step{padding:8px 0;border-bottom:1px solid var(--line);font-size:13px;line-height:1.5}
+.step:last-child{border:0}
+.step b{color:var(--acc)}
+details summary{cursor:pointer;color:var(--dim);font-size:13px;padding:4px 0}
+.prog{height:6px;background:#0d1117;border-radius:3px;overflow:hidden;margin-top:10px}
+.prog>div{height:100%;background:var(--acc);width:0%;transition:width .5s}
 </style>
 </head>
 <body>
-
 <h1>ESP32 导航推送端</h1>
 
 <div class="card">
-  <div class="stat">
-    MQTT：<b id="mqttStat" class="off">未连接</b> ·
-    定位：<b id="gpsStat" class="off">未开启</b> ·
-    精度 <span id="acc">-</span>m
-  </div>
-  <div class="big" id="pos">--.----, --.----</div>
-  <div class="row">
-    <button id="btnStart">开始导航</button>
-    <button id="btnStop" class="danger">停止</button>
-    <button id="btnTest" class="ghost">模拟一条（测试板子）</button>
-  </div>
-  <div class="hint">「开始导航」会请求定位权限并保持屏幕常亮。锁屏后 iOS 会暂停网页，导航时请保持亮屏（或用充电支架）。</div>
+  <div class="stat">MQTT：<b id="mqttStat" class="off">连接中</b> · 频道 <span id="topicShow"></span></div>
+  <div class="stat">GPS：<b id="gpsStat" class="off">未开启</b> · 精度 <span id="acc">-</span>m</div>
+  <div class="stat">状态：<b id="navState" class="off">待机</b></div>
 </div>
 
+<h2>① 高德 Key（首次填写，之后自动记住）</h2>
 <div class="card">
-  <h1 style="font-size:14px">转弯点列表（按顺序经过）</h1>
+  <input id="amapKey" placeholder="粘贴高德 Web服务 Key" autocomplete="off">
+  <div class="hint">免费获取：lbs.amap.com → 登录 → 控制台 → 应用管理 → 创建应用 → 添加 Key → 服务平台选 <b>Web服务</b>。个人开发者免费额度每天数千次，够用（首次使用需完成个人实名认证）。</div>
+</div>
+
+<h2>② 规划路线</h2>
+<div class="card">
+  <div class="row"><input id="dest" placeholder="目的地（如：杭州西湖文化广场）"></div>
+  <div class="row"><input id="start" placeholder="出发地（留空 = 当前定位）"></div>
   <div class="row">
-    <input id="lat" placeholder="纬度 30.2741" inputmode="decimal">
-    <input id="lng" placeholder="经度 120.1551" inputmode="decimal">
+    <select id="mode"><option value="walking">步行</option><option value="riding">骑行</option><option value="driving">驾车</option></select>
+    <button id="btnRoute">规划路线</button>
   </div>
+  <div class="sub" id="routeInfo">输入目的地后点「规划路线」</div>
+  <details id="stepsBox" hidden><summary>查看全部转向步骤</summary><div id="steps"></div></details>
+</div>
+
+<h2>③ 开始</h2>
+<div class="card">
+  <div class="row"><button id="btnGo">开始导航（真实 GPS）</button></div>
   <div class="row">
-    <select id="dir">
-      <option value="0">直行</option><option value="1">左转</option>
-      <option value="2">右转</option><option value="3">掉头</option>
-      <option value="4">到达</option>
+    <select id="simSpeed" style="flex:0 0 38%">
+      <option value="1.4">漫步 1.4m/s</option><option value="5">5 m/s</option><option value="20" selected>快速 20m/s</option><option value="60">光速 60m/s</option>
     </select>
-    <input id="road" placeholder="路名（如 文一西路）">
-    <button id="btnAdd">添加</button>
+    <button id="btnSim" class="ghost">室内模拟行走</button>
   </div>
-  <div id="list"></div>
-  <div class="row"><button id="btnClear" class="ghost">清空全部</button>
-  <button id="btnHere" class="ghost">把当前位置填入上面</button></div>
-  <div class="hint">取坐标：在高德地图网页版（lbs.amap.com/tools/picker）点选位置复制经纬度，注意顺序是「经度,纬度」，填的时候反过来。距离转弯点 &lt;40 米视为已通过，自动切到下一个。</div>
+  <div class="row"><button id="btnStop" class="red">停止</button></div>
+  <div class="hint">室内模拟 = 沿规划好的路线虚拟前进，不出门就能完整测试板子的屏幕和蜂鸣。真实导航请用上面的按钮（保持屏幕常亮，锁屏会暂停）。</div>
+</div>
+
+<h2>导航状态</h2>
+<div class="card">
+  <div class="next" id="nextTurn">--</div>
+  <div class="big"><span id="dist">--</span><span style="font-size:20px" id="unit"></span></div>
+  <div class="sub" id="nextRoad">等待路线…</div>
+  <div class="prog"><div id="prog"></div></div>
+  <div class="hint" style="text-align:center;margin-top:6px">总程 <span id="totalLen">-</span> · 已走 <span id="doneLen">-</span></div>
 </div>
 
 <div class="card">
-  <div class="big" id="next">--</div>
-  <div class="stat" style="text-align:center" id="nextInfo">等待定位…</div>
+  <button id="btnTest" class="ghost">模拟一条（直接测试板子）</button>
 </div>
 
 <script>
-// ========= 配置：与固件里 NAV_TOPIC 保持一致 =========
-const TOPIC = 'wbx/nav/demo';
+// ========= 配置 =========
 const MQTT_URL = 'wss://broker.emqx.io:8084/mqtt';
-const PASS_RADIUS = 40;   // 距离转弯点小于该米数视为已通过
-// ====================================================
-
-let client = null, watchId = null, wakeLock = null;
-let cur = null;                       // {lat,lng,acc}
-let waypoints = JSON.parse(localStorage.getItem('wps') || '[]');
-let nextIdx = 0;
-
+const TOPIC = 'wbx/nav/demo';   // 与固件 NAV_TOPIC 保持一致，建议改成随机串
 const $ = id => document.getElementById(id);
 
-// ---------- MQTT ----------
-function mqttConnect() {
-  client = mqtt.connect(MQTT_URL, {clientId: 'wbx-iphone-' + Math.random().toString(16).slice(2, 8)});
-  client.on('connect', () => { $('mqttStat').textContent = '已连接'; $('mqttStat').className = 'b'; });
-  client.on('close', () => { $('mqttStat').textContent = '断开'; $('mqttStat').className = 'b off'; });
-  client.on('error', e => console.error(e));
+// ========= 状态 =========
+let client=null, watchId=null, wakeLock=null;
+let route=null;          // {pts:[{lat,lng}], cum:[米], turns:[{at,dir,road}], total}
+let pos=null;            // 当前位置 {lat,lng}
+let simTimer=null, lastPub=0, lastSent=null;
+
+$('topicShow').textContent = TOPIC;
+$('amapKey').value = localStorage.getItem('wbx_key') || '';
+$('dest').value    = localStorage.getItem('wbx_dest') || '';
+$('amapKey').onchange = e => localStorage.setItem('wbx_key', e.target.value.trim());
+$('dest').onchange    = e => localStorage.setItem('wbx_dest', e.target.value.trim());
+
+// ========= MQTT =========
+function mqttConnect(){
+  if (client && client.connected) return;
+  client = mqtt.connect(MQTT_URL, {clientId:'wbx-nav-'+Math.random().toString(16).slice(2,8)});
+  client.on('connect', ()=>{ $('mqttStat').textContent='已连接'; $('mqttStat').className='b'; });
+  client.on('close',   ()=>{ $('mqttStat').textContent='断开'; $('mqttStat').className='b off'; });
+  client.on('error',   e=>console.error(e));
 }
-function publish(obj) {
-  if (client && client.connected) client.publish(TOPIC, JSON.stringify(obj));
+function publish(obj){
+  const s = JSON.stringify(obj);
+  if (s === lastSent) return;          // 内容没变不重复发
+  lastSent = s;
+  if (client && client.connected) client.publish(TOPIC, s);
+}
+mqttConnect();
+
+// ========= 高德 API（JSONP，无跨域问题）=========
+function jsonp(url){
+  return new Promise((res,rej)=>{
+    const cb='amapcb'+Math.random().toString(36).slice(2);
+    const s=document.createElement('script');
+    const fail=()=>{cleanup();rej(new Error('请求超时/失败，检查 Key 和网络'))};
+    const t=setTimeout(fail,12000);
+    function cleanup(){clearTimeout(t);delete window[cb];s.remove();}
+    window[cb]=d=>{cleanup();res(d);};
+    s.src=url+'&callback='+cb;
+    s.onerror=fail;
+    document.head.appendChild(s);
+  });
+}
+async function amapGeocode(addr,key){
+  const r = await jsonp(`https://restapi.amap.com/v3/geocode/geo?address=${encodeURIComponent(addr)}&key=${key}`);
+  if (r.status!=='1' || !r.geocodes || !r.geocodes.length) throw new Error('地址没找到：'+addr);
+  const [lng,lat] = r.geocodes[0].location.split(',').map(Number);
+  return {lng,lat};
+}
+async function amapRoute(o,d,key,mode){
+  const r = await jsonp(`https://restapi.amap.com/v3/direction/${mode}?origin=${o.lng},${o.lat}&destination=${d.lng},${d.lat}&key=${key}`);
+  if (r.status!=='1') throw new Error('路径规划失败：'+(r.info||''));
+  const path = r.route.paths[0];
+  return path.steps.map(st=>({
+    instruction: st.instruction||'',
+    road: st.road||'',
+    dist: +st.distance||0,
+    pts: st.polyline.split(';').map(p=>{const [lng,lat]=p.split(',').map(Number);return {lng,lat};})
+  }));
 }
 
-// ---------- 定位 ----------
-function startNav() {
-  mqttConnect();
-  navigator.wakeLock && navigator.wakeLock.request('screen').then(w => wakeLock = w).catch(()=>{});
-  watchId = navigator.geolocation.watchPosition(p => {
-    cur = {lat: p.coords.latitude, lng: p.coords.longitude, acc: Math.round(p.coords.accuracy)};
-    $('gpsStat').textContent = '工作中'; $('gpsStat').className = 'b';
-    $('acc').textContent = cur.acc;
-    $('pos').textContent = cur.lat.toFixed(5) + ', ' + cur.lng.toFixed(5);
-    tick();
-  }, e => {
-    $('gpsStat').textContent = '定位失败: ' + e.message; $('gpsStat').className = 'b off';
-  }, {enableHighAccuracy: true, maximumAge: 1000, timeout: 8000});
+// ========= 路线处理 =========
+const R_EARTH=6371000;
+function distM(a,b){
+  const dLat=(b.lat-a.lat)*Math.PI/180, dLng=(b.lng-a.lng)*Math.PI/180;
+  const s=Math.sin(dLat/2)**2+Math.cos(a.lat*Math.PI/180)*Math.cos(b.lat*Math.PI/180)*Math.sin(dLng/2)**2;
+  return 2*R_EARTH*Math.asin(Math.sqrt(s));
 }
-function stopNav() {
-  if (watchId) navigator.geolocation.clearWatch(watchId);
-  watchId = null; wakeLock && wakeLock.release();
-  $('gpsStat').textContent = '未开启'; $('gpsStat').className = 'b off';
+function parseDir(text,isLast){
+  if (isLast || /到达|终点/.test(text)) return 4;
+  if (/掉头|调头/.test(text)) return 3;
+  if (/右转|向右/.test(text)) return 2;
+  if (/左转|向左/.test(text)) return 1;
+  return 0;
 }
+async function planRoute(){
+  const key=$('amapKey').value.trim();
+  if(!key){alert('先填高德 Key');return;}
+  const dest=$('dest').value.trim();
+  if(!dest){alert('填一下目的地');return;}
+  $('routeInfo').textContent='规划中…';
+  try{
+    const destP=await amapGeocode(dest,key);
+    let startP;
+    const startAddr=$('start').value.trim();
+    if(startAddr){ startP=await amapGeocode(startAddr,key); }
+    else if(pos){ startP={lng:pos.lng,lat:pos.lat}; }
+    else { throw new Error('没拿到当前定位——填出发地，或等 GPS 绿了再点'); }
 
-// ---------- 转弯点 ----------
-function distM(a, b) {
-  const R = 6371000, rad = d => d * Math.PI / 180;
-  const dLat = rad(b.lat - a.lat), dLng = rad(b.lng - a.lng);
-  const s = Math.sin(dLat/2)**2 + Math.cos(rad(a.lat))*Math.cos(rad(b.lat))*Math.sin(dLng/2)**2;
-  return 2 * R * Math.asin(Math.sqrt(s));
+    const steps=await amapRoute(startP,destP,key,$('mode').value);
+    // 展平路径点 + 累计里程 + 转弯点表
+    const pts=[],cum=[0]; let total=0;
+    steps.forEach(st=>st.pts.forEach(p=>{
+      if(pts.length){ total+=distM(pts[pts.length-1],p); cum.push(total); }
+      pts.push(p);
+    }));
+    const turns=[]; let acc=0;
+    steps.forEach((st,i)=>{ acc+=st.dist; turns.push({at:acc,dir:parseDir(st.instruction,i===steps.length-1),road:st.road||st.instruction.slice(0,8)}); });
+    route={pts,cum,turns,total};
+    $('routeInfo').innerHTML=`✅ 全程 <b>${fmt(total)}</b>，共 ${steps.length} 段`;
+    $('totalLen').textContent=fmt(total);
+    $('stepsBox').hidden=false;
+    $('steps').innerHTML=steps.map(s=>`<div class="step"><b>${fmt(+s.dist)}</b> · ${s.instruction}</div>`).join('');
+    $('nextTurn').textContent='就绪';
+    $('nextRoad').textContent='点「开始导航」或「室内模拟行走」';
+  }catch(e){ $('routeInfo').textContent='❌ '+e.message; }
 }
-function tick() {
-  if (!cur || nextIdx >= waypoints.length) {
-    if (cur && waypoints.length && nextIdx >= waypoints.length) {
-      $('next').textContent = '🏁'; $('nextInfo').textContent = '全部转弯点已通过';
-      publish({dist: 0, dir: 4, road: '到达'});
-      nextIdx = waypoints.length + 1;   // 只发一次到达
-    }
-    return;
+function fmt(m){ return m>=1000 ? (m/1000).toFixed(1)+' km' : Math.round(m)+' 米'; }
+
+// ========= 定位匹配：找最近路径点 -> 下一个转弯 =========
+function locateOnRoute(p){
+  let best=0,bd=1e18;
+  for(let i=0;i<route.pts.length;i++){
+    const d=distM(p,route.pts[i]);
+    if(d<bd){bd=d;best=i;}
   }
-  const w = waypoints[nextIdx];
-  const d = Math.round(distM(cur, w));
-  $('next').textContent = d + ' m';
-  $('nextInfo').textContent = (w.dir == 1 ? '左转 ' : w.dir == 2 ? '右转 ' : w.dir == 3 ? '掉头 ' : '直行 ') + (w.road || '');
-  publish({dist: d, dir: w.dir, road: w.road || ''});
-  if (d < PASS_RADIUS) nextIdx++;
+  return {idx:best, cum:route.cum[best], offRoute:bd};
 }
-setInterval(() => { if (watchId) tick(); }, 2000);   // 2 秒推一次
+function nextTurnFor(cum){
+  for(const t of route.turns) if(t.at > cum + 3) return t;   // 3米滞回防抖
+  return {at:route.total, dir:4, road:''};
+}
+function tick(){
+  if(!route||!pos) return;
+  const {cum,offRoute}=locateOnRoute(pos);
+  const t=nextTurnFor(cum);
+  const remain=Math.max(0,Math.round(t.at-cum));
+  // 界面
+  $('nextTurn').textContent={0:'⬆ 直行',1:'⬅ 左转',2:'➡ 右转',3:'↩ 掉头',4:'🏁 到达'}[t.dir];
+  $('dist').textContent=remain>=1000?(remain/1000).toFixed(1):remain;
+  $('unit').textContent=remain>=1000?'km':'m';
+  $('nextRoad').textContent=t.road+(offRoute>60?'（偏离路线 '+Math.round(offRoute)+'m）':'');
+  $('doneLen').textContent=fmt(Math.min(cum,route.total));
+  $('prog').style.width=(cum/route.total*100).toFixed(1)+'%';
+  $('navState').textContent = simTimer?'模拟中':(watchId?'导航中':'待机');
+  $('navState').className='b';
+  // 推送（每 2 秒）
+  const now=Date.now();
+  if(now-lastPub>=2000){ lastPub=now; publish({dist:remain,dir:t.dir,road:t.road||''}); }
+}
 
-// ---------- UI ----------
-function render() {
-  $('list').innerHTML = waypoints.map((w, i) =>
-    `<div class="wpt">${i+1}. <b>${['直行','左转','右转','掉头','到达'][w.dir]}</b> ${w.road||''} <span>${w.lat.toFixed(5)},${w.lng.toFixed(5)}</span></div>`).join('')
-    || '<div class="wpt">还没有转弯点</div>';
-  localStorage.setItem('wps', JSON.stringify(waypoints));
-}
-$('btnAdd').onclick = () => {
-  const lat = parseFloat($('lat').value), lng = parseFloat($('lng').value);
-  if (isNaN(lat) || isNaN(lng)) return alert('坐标没填对');
-  waypoints.push({lat, lng, dir: +$('dir').value, road: $('road').value});
-  nextIdx = 0; render();
-};
-$('btnClear').onclick = () => { waypoints = []; nextIdx = 0; render(); };
-$('btnHere').onclick = () => { if (cur) { $('lat').value = cur.lat.toFixed(6); $('lng').value = cur.lng.toFixed(6); } else alert('先点「开始导航」拿到定位'); };
-$('btnStart').onclick = startNav;
-$('btnStop').onclick = stopNav;
-$('btnTest').onclick = () => {   // 桌面测试：直接给板子发一条
+// ========= 模式一：真实 GPS =========
+function startGPS(){
+  if(!route){alert('先规划路线');return;}
+  stopAll();
   mqttConnect();
-  setTimeout(() => publish({dist: 300, dir: 2, road: '文一西路'}), 800);
+  navigator.wakeLock&&navigator.wakeLock.request('screen').then(w=>wakeLock=w).catch(()=>{});
+  watchId=navigator.geolocation.watchPosition(p=>{
+    // GPS 是 WGS84，高德是 GCJ-02，需纠偏
+    const g=wgs2gcj(p.coords.latitude,p.coords.longitude);
+    pos={lat:g[0],lng:g[1]};
+    $('gpsStat').textContent='工作中'; $('gpsStat').className='b';
+    $('acc').textContent=Math.round(p.coords.accuracy);
+    tick();
+  },e=>{ $('gpsStat').textContent='定位失败: '+e.message; $('gpsStat').className='b off'; },
+  {enableHighAccuracy:true,maximumAge:1000,timeout:8000});
+}
+
+// ========= 模式二：室内模拟 =========
+function startSim(){
+  if(!route){alert('先规划路线');return;}
+  stopAll();
+  mqttConnect();
+  pos={...route.pts[0]};
+  const speed=+$('simSpeed').value;
+  const interval=400, step=speed*interval/1000;
+  let i=0;
+  simTimer=setInterval(()=>{
+    let remain=step;
+    while(remain>0&&i<route.pts.length-1){
+      const a=route.pts[i],b=route.pts[i+1];
+      const seg=distM(a,b);
+      if(seg<=remain||seg===0){remain-=seg;i++;}
+      else{
+        const r=remain/seg;
+        pos={lat:a.lat+(b.lat-a.lat)*r,lng:a.lng+(b.lng-a.lng)*r};
+        remain=0;
+      }
+    }
+    if(i>=route.pts.length-1){ pos={...route.pts[route.pts.length-1]}; }
+    tick();
+    if(i>=route.pts.length-1){ clearInterval(simTimer); simTimer=null; }
+  },interval);
+}
+
+// ========= 停止 / 测试 =========
+function stopAll(){
+  if(watchId){navigator.geolocation.clearWatch(watchId);watchId=null;}
+  if(simTimer){clearInterval(simTimer);simTimer=null;}
+  wakeLock&&wakeLock.release&&wakeLock.release();
+  $('gpsStat').textContent='未开启'; $('gpsStat').className='b off';
+  $('navState').textContent='已停止'; $('navState').className='b off';
+}
+$('btnRoute').onclick=planRoute;
+$('btnGo').onclick=startGPS;
+$('btnSim').onclick=startSim;
+$('btnStop').onclick=stopAll;
+$('btnTest').onclick=()=>{
+  mqttConnect();
+  lastSent=null;
+  publish({dist:300,dir:2,road:'文一西路'});
 };
-render();
+
+// ========= WGS84 -> GCJ02 纠偏（标准算法）=========
+function wgs2gcj(wgLat,wgLng){
+  const a=6378245.0,ee=0.00669342162296594323;
+  function tL(lng,lat){
+    let d=20*Math.sin(6*lng*Math.PI)+20*Math.sin(2*lng*Math.PI);
+    d*=2/3; d+=20*Math.sin(lat*Math.PI)*2/3; d+=20*Math.sin(lat/3*Math.PI)*2/3; d+=100+2*lng+300*Math.cos(lat*Math.PI)/3;
+    return d*180/Math.PI;
+  }
+  let dLat=tL(wgLng-105,wgLat-35), dLng=tL(wgLat-35,wgLng-105);
+  const radLat=wgLat/180*Math.PI; let magic=Math.sin(radLat); magic=1-ee*magic*magic;
+  const sqrtMagic=Math.sqrt(magic);
+  return [wgLat+(dLat*180)/((a*(1-ee))/(magic*sqrtMagic)*Math.PI), wgLng+(dLng*180)/(a/sqrtMagic*Math.cos(radLat)*Math.PI)];
+}
 </script>
 </body>
 </html>
