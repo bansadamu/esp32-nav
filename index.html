@@ -40,6 +40,7 @@ details summary{cursor:pointer;color:var(--dim);font-size:13px;padding:4px 0}
   <div class="stat">MQTT：<b id="mqttStat" class="off">连接中</b> · 频道 <span id="topicShow"></span></div>
   <div class="stat">GPS：<b id="gpsStat" class="off">未开启</b> · 精度 <span id="acc">-</span>m</div>
   <div class="stat">状态：<b id="navState" class="off">待机</b></div>
+  <div class="stat">推送给板子：<b id="pubStat" class="off">无</b>（每 2 秒一次）</div>
 </div>
 
 <h2>① 高德 Key（首次填写，之后自动记住）</h2>
@@ -96,7 +97,7 @@ const $ = id => document.getElementById(id);
 let client=null, watchId=null, wakeLock=null;
 let route=null;          // {pts:[{lat,lng}], cum:[米], turns:[{at,dir,road}], total}
 let pos=null;            // 当前位置 {lat,lng}
-let simTimer=null, lastPub=0, lastSent=null;
+let simTimer=null, lastPub=0, lastPubAt=0;
 
 $('topicShow').textContent = TOPIC;
 $('amapKey').value = localStorage.getItem('wbx_key') || '';
@@ -113,12 +114,24 @@ function mqttConnect(){
   client.on('error',   e=>console.error(e));
 }
 function publish(obj){
-  const s = JSON.stringify(obj);
-  if (s === lastSent) return;          // 内容没变不重复发
-  lastSent = s;
-  if (client && client.connected) client.publish(TOPIC, s);
+  if (client && client.connected) client.publish(TOPIC, JSON.stringify(obj));
+  lastPubAt = Date.now();
+  $('pubStat').textContent = Math.round(obj.dist) + 'm · 刚刚';
+  $('pubStat').className = 'b';
 }
 mqttConnect();
+
+// ========= 页面打开就挂着定位（只显示状态，不参与导航）=========
+navigator.geolocation.watchPosition(p=>{
+  const g=wgs2gcj(p.coords.latitude,p.coords.longitude);
+  if(!watchId) pos={lat:g[0],lng:g[1]};   // 未开始导航时缓存位置，规划路线可用
+  if($('gpsStat').textContent==='未开启'||$('gpsStat').textContent.startsWith('定位失败')){
+    $('gpsStat').textContent='信号正常'; $('gpsStat').className='b';
+    $('acc').textContent=Math.round(p.coords.accuracy);
+  }
+},e=>{
+  $('gpsStat').textContent='定位失败: '+e.message; $('gpsStat').className='b off';
+},{enableHighAccuracy:true,maximumAge:5000,timeout:10000});
 
 // ========= 高德 API（JSONP，无跨域问题）=========
 function jsonp(url){
@@ -190,6 +203,7 @@ async function planRoute(){
     const turns=[]; let acc=0;
     steps.forEach((st,i)=>{ acc+=st.dist; turns.push({at:acc,dir:parseDir(st.instruction,i===steps.length-1),road:st.road||st.instruction.slice(0,8)}); });
     route={pts,cum,turns,total};
+    lastIdx = 0;
     $('routeInfo').innerHTML=`✅ 全程 <b>${fmt(total)}</b>，共 ${steps.length} 段`;
     $('totalLen').textContent=fmt(total);
     $('stepsBox').hidden=false;
@@ -201,13 +215,21 @@ async function planRoute(){
 function fmt(m){ return m>=1000 ? (m/1000).toFixed(1)+' km' : Math.round(m)+' 米'; }
 
 // ========= 定位匹配：找最近路径点 -> 下一个转弯 =========
+let lastIdx = 0;
 function locateOnRoute(p){
-  let best=0,bd=1e18;
-  for(let i=0;i<route.pts.length;i++){
-    const d=distM(p,route.pts[i]);
-    if(d<bd){bd=d;best=i;}
+  // 优先在上次位置附近找（快），失败再全量扫
+  function scan(from,to){
+    let best=-1,bd=1e18;
+    for(let i=Math.max(0,from);i<Math.min(to,route.pts.length);i++){
+      const d=distM(p,route.pts[i]);
+      if(d<bd){bd=d;best=i;}
+    }
+    return {idx:best,bd};
   }
-  return {idx:best, cum:route.cum[best], offRoute:bd};
+  let r = scan(lastIdx-300, lastIdx+300);
+  if(r.idx<0 || r.idx<=lastIdx-300 || r.idx>=lastIdx+300-1) r = scan(0, route.pts.length);
+  lastIdx = r.idx;
+  return {idx:r.idx, cum:route.cum[r.idx], offRoute:r.bd};
 }
 function nextTurnFor(cum){
   for(const t of route.turns) if(t.at > cum + 3) return t;   // 3米滞回防抖
@@ -237,6 +259,7 @@ function startGPS(){
   if(!route){alert('先规划路线');return;}
   stopAll();
   mqttConnect();
+  lastIdx = 0;
   navigator.wakeLock&&navigator.wakeLock.request('screen').then(w=>wakeLock=w).catch(()=>{});
   watchId=navigator.geolocation.watchPosition(p=>{
     // GPS 是 WGS84，高德是 GCJ-02，需纠偏
@@ -254,6 +277,7 @@ function startSim(){
   if(!route){alert('先规划路线');return;}
   stopAll();
   mqttConnect();
+  lastIdx = 0;
   pos={...route.pts[0]};
   const speed=+$('simSpeed').value;
   const interval=400, step=speed*interval/1000;
@@ -263,16 +287,15 @@ function startSim(){
     while(remain>0&&i<route.pts.length-1){
       const a=route.pts[i],b=route.pts[i+1];
       const seg=distM(a,b);
-      if(seg<=remain||seg===0){remain-=seg;i++;}
+      if(seg<=remain||seg===0){remain-=seg;i++;pos={...b};}   // 跳点时同步更新 pos，防冻结
       else{
         const r=remain/seg;
         pos={lat:a.lat+(b.lat-a.lat)*r,lng:a.lng+(b.lng-a.lng)*r};
         remain=0;
       }
     }
-    if(i>=route.pts.length-1){ pos={...route.pts[route.pts.length-1]}; }
     tick();
-    if(i>=route.pts.length-1){ clearInterval(simTimer); simTimer=null; }
+    if(i>=route.pts.length-1){ clearInterval(simTimer); simTimer=null; $('navState').textContent='🏁 模拟到达'; }
   },interval);
 }
 
